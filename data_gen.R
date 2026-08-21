@@ -1,6 +1,6 @@
 ## =============================================================================
-## Generates the GROUND TRUTH: population rate curve, subject-level random
-## effects, and visit design. 
+## Generates the ground truth: population rate curve, subject-level anchors,
+## and visit design -- all in plain R
 ## =============================================================================
 
 library(nimble)
@@ -12,7 +12,7 @@ library(mgcv)
 library(MASS)
 
 ## -----------------------------------------------------------------------
-## 1. True population log-rate spline + evaluation grid (independent of any observed data)
+## 1. True population log-rate spline + evaluation grid
 ## -----------------------------------------------------------------------
 
 simulate_true_rate <- function(YL = 0.30, YU = 1.70, K = 8, nGrid = 201,
@@ -27,7 +27,6 @@ simulate_true_rate <- function(YL = 0.30, YU = 1.70, K = 8, nGrid = 201,
   
   if (is.null(theta_true)) {
     if (shape == "sigmoid") {
-      # slow -> fast -> slow log-rate profile, loosely matching the RW1 prior
       theta_true <- seq(-9, -4.5, length.out = Kactual)
       theta_true <- theta_true + rev(cumsum(rev(c(0, diff(theta_true))) * 0.15))
     } else {
@@ -43,20 +42,19 @@ simulate_true_rate <- function(YL = 0.30, YU = 1.70, K = 8, nGrid = 201,
 }
 
 ## -----------------------------------------------------------------------
-## 2. Subject-level random effects and visit design
+## 2. Subject-level anchors (t0, x0, p), number of visits (J), and visit ages (tvisit)
 ## -----------------------------------------------------------------------
 
 simulate_design <- function(N = 200,
                             sigma_delta_true = 0.4,
                             sigma_eps_true = 0.05,
-                            x0_range = c(0.9, 1.3),   # anchor SUVR value range
-                            t0_range = c(50, 80),      # anchor age range (yrs)
+                            x0_range = c(0.55, 1.3),   # anchor SUVR value range
+                            t0_range = c(55, 80),      # anchor age range (yrs)
                             visits_range = 2:6,
                             visit_prob = c(0.44, .27, .13, .10, .06),
                             visit_gap_mean = 1.5,       # years between visits
                             visit_gap_sd = 0.3) {
   
-  delta <- rnorm(N, 0, sigma_delta_true)          # subject random intercept (log-scale mult.)
   x0 <- runif(N, x0_range[1], x0_range[2])        # anchor value
   t0 <- runif(N, t0_range[1], t0_range[2])        # anchor age
   
@@ -64,17 +62,20 @@ simulate_design <- function(N = 200,
   Jmax <- max(Jvec)
   
   tvisit <- matrix(NA_real_, N, Jmax)
+  p <- integer(N)
   for (i in seq_len(N)) {
     Ji <- Jvec[i]
     # place anchor near the middle of the visit sequence, then space visits
-    # forward/backward from it by ~visit_gap_mean years (matches the bidirectional integration)
+    # forward/backward from it by ~visit_gap_mean years
     gaps <- rnorm(Ji - 1, visit_gap_mean, visit_gap_sd)
     gaps <- pmax(gaps, 0.25)
-    offsets <- cumsum(c(0, gaps)) - cumsum(c(0, gaps))[ceiling(Ji / 2)]
+    anchor_pos <- ceiling(Ji / 2)
+    offsets <- cumsum(c(0, gaps)) - cumsum(c(0, gaps))[anchor_pos]
     tvisit[i, 1:Ji] <- sort(t0[i] + offsets)
+    p[i] <- max(which(tvisit[i, 1:Ji] <= t0[i]))
   }
   
-  list(N = N, J = Jvec, Jmax = Jmax, tvisit = tvisit,
-       delta_true = delta, x0_true = x0, t0_true = t0,
+  list(N = N, J = Jvec, Jmax = Jmax, tvisit = tvisit, p = p,
+       x0_true = x0, t0_true = t0,
        sigma_delta_true = sigma_delta_true, sigma_eps_true = sigma_eps_true)
 }
