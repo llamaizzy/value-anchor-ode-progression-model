@@ -78,13 +78,13 @@ simulate_amyloid_data <- function(truth, design, maxSub = 0.25, seed = NULL,
   
   y <- cm$y
   mu_true <- cm$mu
-  delta_realized <- cm$delta   # the delta actually drawn this call
+  delta_true <- cm$delta   # the delta actually drawn this call
   N <- design$N
   dat <- do.call(rbind, lapply(seq_len(N), function(i) {
     Ji <- design$J[i]
     data.frame(id = i, age = design$tvisit[i, 1:Ji], suvr = y[i, 1:Ji])
   }))
   
-  list(dat = dat, y = y, mu_true = mu_true, delta_realized = delta_realized,
+  list(dat = dat, y = y, mu_true = mu_true, delta_true = delta_true,
        sim_build = sim_build)
 }

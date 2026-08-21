@@ -169,7 +169,7 @@ prepare_amyloid <- function(dat, YL = 0.30, YU = 1.70, K = 8, nGrid = 201) {
   }
   
   # B-spline basis on a fixed evaluation grid (over all subjects)
-  interiorProbs <- seq(0.05, 0.95, length.out = max(K - 4, 1)) # evenly spaced fom 5th-95th percentiles of observed values
+  interiorProbs <- seq(0.05, 0.95, length.out = max(K - 4, 1)) # evenly spaced from 5th-95th percentiles of observed values
   interiorKnots <- unique(as.numeric(quantile(dat$suvr, probs = interiorProbs, na.rm = TRUE)))
   ygrid <- seq(YL, YU, length.out = nGrid)
   Bgrid <- splines::bs(ygrid, knots = interiorKnots, Boundary.knots = c(YL, YU),

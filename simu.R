@@ -56,13 +56,13 @@ simu <- function(outer_iter = 1,
     
     # positivity-age recovery for a handful of subjects: true crossing age
     # from the noiseless truth vs. posterior credible interval from the fit.
-    # Uses the delta NIMBLE actually simulated (sim$delta_realized), not any
+    # Uses the delta NIMBLE actually simulated (sim$delta_true), not any
     # placeholder value, since simulate() draws its own fresh delta each call.
     check_ids <- seq_len(min(5, design$N))
     pos_check <- lapply(check_ids, function(i) {
       true_age <- predict_positivity_age(design$x0_true[i], design$t0_true[i],
                                          amy_thres, truth$ygrid, truth$Rgrid_true,
-                                         exp(sim$delta_realized[i]))
+                                         exp(sim$delta_true[i]))
       x_col <- paste0("x[", i, "]"); delta_col <- paste0("delta[", i, "]")
       ages <- sapply(seq_len(nrow(samp)), function(r)
         positivity_age_from_draw(samp[r, theta_cols], samp[r, delta_col],
@@ -87,8 +87,8 @@ simu <- function(outer_iter = 1,
       id = 1:5,
       t0 = design$t0_true[1:5],
       x0 = design$x0_true[1:5],
-      delta = sim$delta_realized[1:5],
-      mult = exp(sim$delta_realized[1:5]),
+      delta = sim$delta_true[1:5],
+      mult = exp(sim$delta_true[1:5]),
       alpha = sapply(1:5, function(i) {
         predict_positivity_age(
           design$x0_true[i],
@@ -96,7 +96,7 @@ simu <- function(outer_iter = 1,
           amy_thres,
           truth$ygrid,
           truth$Rgrid_true,
-          exp(sim$delta_realized[i])
+          exp(sim$delta_true[i])
         )
       })
     )
