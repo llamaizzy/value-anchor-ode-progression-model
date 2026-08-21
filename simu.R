@@ -33,7 +33,7 @@ simu <- function(outer_iter = 1,
     design <- simulate_design(N = N, sigma_delta_true = sigma_delta_true,
                               sigma_eps_true = sigma_eps_true)
     
-    ## 2. forward-simulate observed data (NIMBLE simulate(): delta -> mu -> y) --
+    ## 2. Simulate observed data (NIMBLE simulate(): delta -> mu -> y) --
     sim <- simulate_amyloid_data(truth, design, maxSub = maxSub)
     
     ## 3. fit -----------------------------------------------------------------
@@ -83,6 +83,24 @@ simu <- function(outer_iter = 1,
       time = fit$time
     )
     
+    df <- data.frame(
+      id = 1:5,
+      t0 = design$t0_true[1:5],
+      x0 = design$x0_true[1:5],
+      delta = sim$delta_realized[1:5],
+      mult = exp(sim$delta_realized[1:5]),
+      alpha = sapply(1:5, function(i) {
+        predict_positivity_age(
+          design$x0_true[i],
+          design$t0_true[i],
+          amy_thres,
+          truth$ygrid,
+          truth$Rgrid_true,
+          exp(sim$delta_realized[i])
+        )
+      })
+    )
+    
     if (save_res) {
       rdir <- file.path(out_dir, paste0("iter", it))
       if (!dir.exists(rdir)) dir.create(rdir, recursive = TRUE)
@@ -91,9 +109,9 @@ simu <- function(outer_iter = 1,
     }
   }
   
-  list(seed_list = seed_list, summaries = summaries)
+  list(seed_list = seed_list, summaries = summaries, df = df)
 }
-
 ## Example single run:
 res <- simu(outer_iter = 1, N = 150, niter = 3000, nburnin = 1000, nchains = 2)
 res$summaries[[1]]
+res$df[[1]]
