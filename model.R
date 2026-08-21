@@ -72,7 +72,7 @@ integrateInterval <- nimbleFunction(
                  maxSub = double(0)) {
     returnType(double(0))
     dt <- t1 - t0  # interval between t1 and t0
-    nSteps <- ceil(abs(dt) / maxSub) # number of sub-steps needed so doesn't exceed maxSub
+    nSteps <- ceiling(abs(dt) / maxSub) # number of sub-steps needed so doesn't exceed maxSub
     if (nSteps < 1) nSteps <- 1 # guard prevent zero step loop when t0 == t1
     h <- dt / nSteps         # sub-step size (negative if integrate backwards)
     muCur <- mu0
@@ -295,85 +295,3 @@ positivity_age_from_draw <- function(theta_draw, delta_draw, x0, t0, amy_thres,
   predict_positivity_age(x0, t0, amy_thres, ygrid, Rgrid, exp(delta_draw),
                          maxSub = maxSub, maxYears = maxYears)
 }
-
-## -----------------------------------------------------------------------
-## 4. Build constants/data/inits from long format data and run the sampler
-## -----------------------------------------------------------------------
-
-build_and_run_amyloid <- function(dat, YL = 0.30, YU = 1.70, K = 8, nGrid = 201,
-                                  maxSub = 0.25, niter = 5000, nburnin = 2000,
-                                  nchains = 3, thin = 1) {
-  
-  ph <- prepare_amyloid(dat, YL = YL, YU = YU, K = K, nGrid = nGrid)
-  
-  consts <- list(N = ph$N, K = ph$K, Jmax = ph$Jmax, nGrid = nGrid,
-                 J = ph$J, p = ph$p, t0 = ph$t0, yhat = ph$yhat, n = ph$n,
-                 tvisit = ph$tvisit, ygrid = ph$ygrid, Bgrid = ph$Bgrid,
-                 maxSub = maxSub)
-  dat_nimble <- list(y = ph$y)
-  
-  inits <- function() list(
-    theta = rnorm(ph$K, -9, 0.05),
-    lambda = rgamma(ph$K, 1, 1),
-    sigma2_theta = 1,
-    sigma_delta = 0.5,
-    sigma_eps = 0.05,
-    delta = rep(0, ph$N),
-    eps = rep(0, ph$N)
-  )
-  
-  model <- nimbleModel(amyloidOdeCode, constants = consts, data = dat_nimble,
-                       inits = inits(), calculate = FALSE)
-  cmodel <- compileNimble(model)
-  
-  conf <- configureMCMC(model, monitors = c("theta", "sigma2_theta", "sigma_delta",
-                                            "sigma_eps", "delta", "x"))
-  # spline coefficients are strongly correlated under the RW prior -- block them
-  conf$removeSamplers(paste0("theta[1:", ph$K, "]"))
-  conf$addSampler(target = paste0("theta[1:", ph$K, "]"), type = "AF_slice")
-  
-  mcmc <- buildMCMC(conf)
-  cmcmc <- compileNimble(mcmc, project = model)
-  
-  samples <- runMCMC(cmcmc, niter = niter, nburnin = nburnin,
-                     nchains = nchains, thin = thin, inits = inits,
-                     samplesAsCodaMCMC = TRUE)
-  
-  list(samples = samples, prepped = ph, consts = consts, data = dat_nimble)
-}
-
-## -----------------------------------------------------------------------
-## 5. Run the model
-## -----------------------------------------------------------------------
-
-load("~/Desktop/Bayesian DPM/simudata.Rdata")
-
-dat_amy <- data.frame(
-  id   = simudata$constants$subject_amy,
-  age  = simudata$constants$t_amy,
-  suvr = simudata$data$y_pred_amy
-)
-
-fit <- build_and_run_amyloid(
-  dat = dat_amy,
-  YL = 0.30,
-  YU = 1.70,
-  K = 8,
-  nGrid = 201,
-  maxSub = 0.25,
-  niter = 100,
-  nburnin = 5,
-  nchains = 2
-)
-
-ph <- fit$prepped
-samp <- as.matrix(fit$samples[[1]])   # chain 1, post-burnin draws
-theta_cols <- grep("^theta\\[", colnames(samp))
-i <- 1  # subject of interest
-x_col <- paste0("x[", i, "]")
-delta_col <- paste0("delta[", i, "]")
-ages <- sapply(seq_len(nrow(samp)), function(s)
-  positivity_age_from_draw(samp[s, theta_cols], samp[s, delta_col], samp[s, x_col], ph$t0[i], amy_thres = 0.75, ph$ygrid, ph$Bgrid))
-
-# Summary: posterior median / 95% credible interval for subject i's positivity age:
-quantile(ages, c(0.025, 0.5, 0.975), na.rm = TRUE)
