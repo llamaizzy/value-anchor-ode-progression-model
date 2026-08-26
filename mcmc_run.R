@@ -18,7 +18,7 @@ build_and_run_amyloid <- function(dat, YL = 0.30, YU = 1.70, K = 8, nGrid = 201,
   dat_nimble <- list(y = ph$y)
   
   inits <- function() list(
-    theta = rnorm(ph$K, -9, 0.05),
+    theta = seq(-9, -2, length.out = K),
     lambda = rgamma(ph$K, 1, 1),
     sigma2_theta = 1,
     sigma_delta = 0.5,
@@ -33,9 +33,15 @@ build_and_run_amyloid <- function(dat, YL = 0.30, YU = 1.70, K = 8, nGrid = 201,
   
   conf <- configureMCMC(model, monitors = c("theta", "sigma2_theta", "sigma_delta",
                                             "sigma_eps", "delta", "x"))
-  # spline coefficients are strongly correlated under the RW prior -- block them
+  # spline coefficients and (eps, delta) are strongly correlated -- block them
   conf$removeSamplers(paste0("theta[1:", ph$K, "]"))
   conf$addSampler(target = paste0("theta[1:", ph$K, "]"), type = "AF_slice")
+  for (i in seq_len(ph$N)) {
+    eps_i   <- paste0("eps[", i, "]")
+    delta_i <- paste0("delta[", i, "]")
+    conf$removeSamplers(c(eps_i, delta_i))
+    conf$addSampler(target = c(eps_i, delta_i), type = "AF_slice")
+  }
   
   mcmc <- buildMCMC(conf)
   cmcmc <- compileNimble(mcmc, project = model)

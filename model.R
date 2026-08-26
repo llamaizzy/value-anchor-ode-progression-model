@@ -193,7 +193,7 @@ prepare_amyloid <- function(dat, YL = 0.30, YU = 1.70, K = 8, nGrid = 201) {
 amyloidOdeCode <- nimbleCode({
   
   ## population log-rate spline
-  theta[1] ~ dnorm(-9, sd = 0.1)
+  theta[1] ~ dnorm(-9, sd = 2)
   for (k in 2:K) {
     theta[k] ~ dnorm(theta[k - 1], var = lambda[k] / sigma2_theta)
     lambda[k] ~ dexp(1)
@@ -201,7 +201,7 @@ amyloidOdeCode <- nimbleCode({
   sigma2_theta ~ dgamma(1e-3, 1e-3)
   
   sigma_delta ~ T(dnorm(0, sd = 1), 0, )
-  sigma_eps   ~ T(dnorm(0, sd = 1), 0, )
+  sigma_eps   ~ T(dnorm(0, sd = 0.1), 0, )
   
   ## population rate curve evaluated once per iteration on the fixed grid
   for (g in 1:nGrid) {

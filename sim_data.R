@@ -1,15 +1,15 @@
 ## =============================================================================
-## Generate simulated data from ground truth
+## Generate observations from ground truth
 ## =============================================================================
 
 source('model.R')     # getTraj nimbleFunction, reused unchanged from the fitting model
 
 ## -----------------------------------------------------------------------
-## The generative (simulation) model.
+## The generative model for observations.
 ##   - theta, sigma_delta, sigma_eps, Bgrid, ygrid, x0, t0, tvisit, p, J
 ##     are passed in as CONSTANTS
 ##   - delta[i] is the only stochastic node NIMBLE actually has to simulate.
-##   - mu and y are downstream of delta (mu deterministically, y stochastically).
+##   - mu and y are downstream of delta (mu deterministically, y stochastically)
 ## -----------------------------------------------------------------------
 
 amyloidSimCode <- nimbleCode({
@@ -34,7 +34,7 @@ amyloidSimCode <- nimbleCode({
 
 ## -----------------------------------------------------------------------
 ## Step 1: build + compile the model.
-## No `data` or `inits` are supplied for delta/y -- they're left NA until
+## No data provided for delta/y -- they're left NA until
 ## simulate() fills them in. Everything else is a constant.
 ## -----------------------------------------------------------------------
 
@@ -80,7 +80,7 @@ simulate_amyloid_data <- function(truth, design, maxSub = 0.25, seed = NULL,
   mu_true <- cm$mu
   delta_true <- cm$delta   # the delta actually drawn this call
   N <- design$N
-  dat <- do.call(rbind, lapply(seq_len(N), function(i) {
+  dat <- do.call(rbind, lapply(seq_len(N), function(i) { # row combining columns
     Ji <- design$J[i]
     data.frame(id = i, age = design$tvisit[i, 1:Ji], suvr = y[i, 1:Ji])
   }))

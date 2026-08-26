@@ -33,7 +33,7 @@ simu <- function(outer_iter = 1,
     design <- simulate_design(N = N, sigma_delta_true = sigma_delta_true,
                               sigma_eps_true = sigma_eps_true)
     
-    ## 2. Simulate observed data (NIMBLE simulate(): delta -> mu -> y) --
+    ## 2. Simulate observed data (delta -> mu -> y) --
     sim <- simulate_amyloid_data(truth, design, maxSub = maxSub)
     
     ## 3. fit -----------------------------------------------------------------
@@ -55,50 +55,69 @@ simu <- function(outer_iter = 1,
                                                xout = ph$ygrid)$y)^2))
     
     # positivity-age recovery for a handful of subjects: true crossing age
-    # from the noiseless truth vs. posterior credible interval from the fit.
-    # Uses the delta NIMBLE actually simulated (sim$delta_true), not any
-    # placeholder value, since simulate() draws its own fresh delta each call.
-    check_ids <- seq_len(min(5, design$N))
-    pos_check <- lapply(check_ids, function(i) {
-      true_age <- predict_positivity_age(design$x0_true[i], design$t0_true[i],
-                                         amy_thres, truth$ygrid, truth$Rgrid_true,
-                                         exp(sim$delta_true[i]))
-      x_col <- paste0("x[", i, "]"); delta_col <- paste0("delta[", i, "]")
-      ages <- sapply(seq_len(nrow(samp)), function(r)
-        positivity_age_from_draw(samp[r, theta_cols], samp[r, delta_col],
-                                 samp[r, x_col], ph$t0[i], amy_thres,
-                                 ph$ygrid, ph$Bgrid))
-      ci <- quantile(ages, c(0.025, 0.5, 0.975), na.rm = TRUE)
-      c(true = true_age, ci, covered = (!is.na(true_age) &&
-                                          true_age >= ci[1] && true_age <= ci[3]))
+    # from the noiseless truth vs. posterior credible interval from the fit
+    check_ids <- seq_len(min(6, design$N))
+    
+    # True quantities for checked subjects
+    true_age <- sapply(check_ids, function(i) {
+      predict_positivity_age(
+        design$x0_true[i],
+        design$t0_true[i],
+        amy_thres,
+        truth$ygrid,
+        truth$Rgrid_true,
+        exp(sim$delta_true[i])
+      )
     })
+    
+    # Posterior positivity-age distributions and credible intervals
+    pos_check <- lapply(seq_along(check_ids), function(j) {
+      i <- check_ids[j]
+      
+      x_col <- paste0("x[", i, "]")
+      delta_col <- paste0("delta[", i, "]")
+      
+      ages <- sapply(seq_len(nrow(samp)), function(r) {
+        positivity_age_from_draw(
+          samp[r, theta_cols],
+          samp[r, delta_col],
+          samp[r, x_col],
+          ph$t0[i],
+          amy_thres,
+          ph$ygrid,
+          ph$Bgrid
+        )
+      })
+      
+      ci <- quantile(ages, c(0.025, 0.5, 0.975), na.rm = TRUE)
+      c(true = true_age[j], ci, covered = !is.na(true_age[j]) &&
+          true_age[j] >= ci[1] &&
+          true_age[j] <= ci[3]
+      )
+    })
+    
     pos_check <- do.call(rbind, pos_check)
     
+    # Subject-level summary
+    df <- data.frame(
+      id = check_ids,
+      t0 = design$t0_true[check_ids],
+      x0 = design$x0_true[check_ids],
+      delta = sim$delta_true[check_ids],
+      mult = exp(sim$delta_true[check_ids]),
+      alpha = true_age
+    )
+    
+    # Store simulation results
     summaries[[it]] <- list(
       seed = s,
-      sigma_delta_true = sigma_delta_true, sigma_delta_est = sigma_delta_est,
-      sigma_eps_true = sigma_eps_true, sigma_eps_est = sigma_eps_est,
+      sigma_delta_true = sigma_delta_true,
+      sigma_delta_est = sigma_delta_est,
+      sigma_eps_true = sigma_eps_true,
+      sigma_eps_est = sigma_eps_est,
       rate_rmse = rate_rmse,
       positivity_check = pos_check,
       time = fit$time
-    )
-    
-    df <- data.frame(
-      id = 1:5,
-      t0 = design$t0_true[1:5],
-      x0 = design$x0_true[1:5],
-      delta = sim$delta_true[1:5],
-      mult = exp(sim$delta_true[1:5]),
-      alpha = sapply(1:5, function(i) {
-        predict_positivity_age(
-          design$x0_true[i],
-          design$t0_true[i],
-          amy_thres,
-          truth$ygrid,
-          truth$Rgrid_true,
-          exp(sim$delta_true[i])
-        )
-      })
     )
     
     if (save_res) {
@@ -111,7 +130,9 @@ simu <- function(outer_iter = 1,
   
   list(seed_list = seed_list, summaries = summaries, df = df)
 }
+
 ## Example single run:
 res <- simu(outer_iter = 1, N = 150, niter = 3000, nburnin = 1000, nchains = 2)
 res$summaries[[1]]
-res$df[[1]]
+res$df
+
