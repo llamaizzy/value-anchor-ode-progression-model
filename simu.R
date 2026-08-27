@@ -140,11 +140,6 @@ simu <- function(outer_iter = 1,
 ## =============================================================================
 ## Diagnostic plots: estimated vs. truth
 ## =============================================================================
-## All four functions below consume the pieces simu() already produces --
-## truth, design, sim, fit -- plus a pooled posterior sample matrix `samp`
-## (rows = draws across all chains, columns = parameters; this is exactly
-## what simu() now returns as res$last_run$samp).
-
 ## -----------------------------------------------------------------------
 ## 1. True vs. estimated rate-vs-value curve R(y)
 ## -----------------------------------------------------------------------
@@ -392,7 +387,7 @@ variance_component_table <- function(design, samp) {
 }
 
 ## Example single run:
-res <- simu(outer_iter = 1, N = 200, niter = 5000, nburnin = 2000, nchains = 3)
+res <- simu(outer_iter = 1, N = 200, niter = 8000, nburnin = 3000, nchains = 3)
 res$summaries[[1]]
 res$df
 
