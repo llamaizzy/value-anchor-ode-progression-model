@@ -2,3 +2,8 @@
 .Rhistory
 .RData
 .Ruserdata
+
+# MCMC output: study.rds is ~78 MB for a single N=1000 replicate and grows
+# linearly with n_rep. Regenerate with `Rscript run_study.R`.
+results/
+figures/

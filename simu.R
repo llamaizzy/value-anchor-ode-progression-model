@@ -1,405 +1,392 @@
-source('data_gen.R')
-source('sim_data.R')  # also sources model.R
-source('mcmc_run.R')
-
 ## =============================================================================
-## Orchestra: generate truth -> simulate data -> fit -> compare posterior to truth.
-## =============================================================================
-
-simu <- function(outer_iter = 1,
-                 # data-generation control
-                 N = 200,
-                 K_true = 8,
-                 sigma_delta_true = 0.4,
-                 sigma_eps_true = 0.05,
-                 amy_thres = 0.75,
-                 # fitting control (should match/bracket the truth's grid)
-                 YL = 0.30, YU = 1.70, K_fit = 8, nGrid = 201, maxSub = 0.25,
-                 niter = 5000, nburnin = 2000, nchains = 3, thin = 1,
-                 # saving
-                 save_res = FALSE, out_dir = "results", seed = NULL) {
-  
-  seed_list <- rep(NA_integer_, outer_iter)
-  summaries <- vector("list", outer_iter)
-  
-  for (it in seq_len(outer_iter)) {
-    
-    s <- if (!is.null(seed)) seed + it - 1L else sample.int(.Machine$integer.max, 1)
-    seed_list[it] <- s
-    set.seed(s)
-    
-    ## 1. ground truth ------------------------------------------------------
-    truth  <- simulate_true_rate(YL = YL, YU = YU, K = K_true, nGrid = nGrid)
-    design <- simulate_design(N = N, sigma_delta_true = sigma_delta_true,
-                              sigma_eps_true = sigma_eps_true)
-    
-    ## 2. Simulate observed data (delta -> mu -> y) --
-    sim <- simulate_amyloid_data(truth, design, maxSub = maxSub)
-    
-    ## 3. fit -----------------------------------------------------------------
-    fit <- build_and_run_amyloid(sim$dat, YL = YL, YU = YU, K = K_fit,
-                                 nGrid = nGrid, maxSub = maxSub,
-                                 niter = niter, nburnin = nburnin,
-                                 nchains = nchains, thin = thin)
-    
-    ph   <- fit$prepped
-    samp <- as.matrix(fit$samples)
-    
-    ## 4. recovery diagnostics -------------------------------------------------
-    sigma_delta_est <- median(samp[, "sigma_delta"])
-    sigma_eps_est   <- median(samp[, "sigma_eps"])
-    
-    theta_cols <- grep("^theta\\[", colnames(samp))
-    Rgrid_est <- exp(as.numeric(ph$Bgrid %*% colMeans(samp[, theta_cols, drop = FALSE])))
-    rate_rmse <- sqrt(mean((Rgrid_est - approx(truth$ygrid, truth$Rgrid_true,
-                                               xout = ph$ygrid)$y)^2))
-    
-    # positivity-age recovery for a handful of subjects: true crossing age
-    # from the noiseless truth vs. posterior credible interval from the fit
-    check_ids <- seq_len(min(6, design$N))
-    
-    # True quantities for checked subjects
-    true_age <- sapply(check_ids, function(i) {
-      predict_positivity_age(
-        design$x0_true[i],
-        design$t0_true[i],
-        amy_thres,
-        truth$ygrid,
-        truth$Rgrid_true,
-        exp(sim$delta_true[i])
-      )
-    })
-    
-    # Posterior positivity-age distributions and credible intervals
-    pos_check <- lapply(seq_along(check_ids), function(j) {
-      i <- check_ids[j]
-      
-      x_col <- paste0("x[", i, "]")
-      delta_col <- paste0("delta[", i, "]")
-      
-      ages <- sapply(seq_len(nrow(samp)), function(r) {
-        positivity_age_from_draw(
-          samp[r, theta_cols],
-          samp[r, delta_col],
-          samp[r, x_col],
-          ph$t0[i],
-          amy_thres,
-          ph$ygrid,
-          ph$Bgrid
-        )
-      })
-      
-      ci <- quantile(ages, c(0.025, 0.5, 0.975), na.rm = TRUE)
-      c(true = true_age[j], ci, covered = !is.na(true_age[j]) &&
-          true_age[j] >= ci[1] &&
-          true_age[j] <= ci[3]
-      )
-    })
-    
-    pos_check <- do.call(rbind, pos_check)
-    
-    # Subject-level summary
-    df <- data.frame(
-      id = check_ids,
-      t0 = design$t0_true[check_ids],
-      x0 = design$x0_true[check_ids],
-      delta = sim$delta_true[check_ids],
-      mult = exp(sim$delta_true[check_ids]),
-      alpha = true_age
-    )
-    
-    # Store simulation results
-    summaries[[it]] <- list(
-      seed = s,
-      sigma_delta_true = sigma_delta_true,
-      sigma_delta_est = sigma_delta_est,
-      sigma_eps_true = sigma_eps_true,
-      sigma_eps_est = sigma_eps_est,
-      rate_rmse = rate_rmse,
-      positivity_check = pos_check,
-      time = fit$time
-    )
-    
-    if (save_res) {
-      rdir <- file.path(out_dir, paste0("iter", it))
-      if (!dir.exists(rdir)) dir.create(rdir, recursive = TRUE)
-      saveRDS(list(truth = truth, design = design, sim = sim, fit = fit,
-                   summary = summaries[[it]]), file.path(rdir, "run.rds"))
-    }
-    
-    # keep the full objects from whichever iteration ran last, so a single
-    # simu() call can be handed straight to the diagnostic plots below
-    # without needing save_res = TRUE
-    last_run <- list(truth = truth, design = design, sim = sim, fit = fit, samp = samp)
-  }
-  
-  list(seed_list = seed_list, summaries = summaries, df = df, last_run = last_run)
-}
-
-
-## =============================================================================
-## Diagnostic plots: estimated vs. truth
-## =============================================================================
-## -----------------------------------------------------------------------
-## 1. True vs. estimated rate-vs-value curve R(y)
-## -----------------------------------------------------------------------
-plot_rate_curve <- function(truth, fit, samp, show_band = TRUE) {
-  ph <- fit$prepped
-  theta_cols  <- grep("^theta\\[", colnames(samp))
-  theta_draws <- samp[, theta_cols, drop = FALSE]
-  
-  Rgrid_draws <- exp(ph$Bgrid %*% t(theta_draws))   # nGrid x ndraws
-  Rgrid_est   <- rowMeans(Rgrid_draws)
-  
-  df <- data.frame(
-    y = ph$ygrid,
-    estimated = Rgrid_est,
-    truth = approx(truth$ygrid, truth$Rgrid_true, xout = ph$ygrid)$y
-  )
-  
-  p <- ggplot(df, aes(x = y))
-  
-  if (show_band) {
-    band <- t(apply(Rgrid_draws, 1, quantile, probs = c(0.025, 0.975)))
-    df$lo <- band[, 1]; df$hi <- band[, 2]
-    p <- ggplot(df, aes(x = y)) +
-      geom_ribbon(aes(ymin = lo, ymax = hi), fill = "steelblue", alpha = 0.2)
-  }
-  
-  p +
-    geom_line(aes(y = truth, color = "Truth"), linewidth = 1) +
-    geom_line(aes(y = estimated, color = "Estimated"), linewidth = 1) +
-    scale_color_manual(values = c(Truth = "black", Estimated = "steelblue"), name = NULL) +
-    labs(x = "SUVR (y)", y = "Rate R(y)",
-         title = "Population rate curve: truth vs. posterior estimate",
-         subtitle = if (show_band) "Shaded band: 95% pointwise posterior interval" else NULL) +
-    theme_bw()
-}
-
-## -----------------------------------------------------------------------
-## 2. True vs. estimated subject-level delta parameters
-## -----------------------------------------------------------------------
-plot_delta_recovery <- function(sim, samp) {
-  N <- length(sim$delta_true)
-  delta_cols <- paste0("delta[", seq_len(N), "]")
-  stopifnot(all(delta_cols %in% colnames(samp)))
-  
-  draws <- samp[, delta_cols, drop = FALSE]
-  est <- apply(draws, 2, median)
-  lo  <- apply(draws, 2, quantile, probs = 0.025)
-  hi  <- apply(draws, 2, quantile, probs = 0.975)
-  
-  df <- data.frame(id = seq_len(N), truth = sim$delta_true,
-                   estimated = est, lo = lo, hi = hi)
-  df$covered <- df$truth >= df$lo & df$truth <= df$hi
-  rng <- range(c(df$truth, df$lo, df$hi))
-  
-  ggplot(df, aes(x = truth, y = estimated, color = covered)) +
-    geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "grey40") +
-    geom_linerange(aes(ymin = lo, ymax = hi), alpha = 0.3) +
-    geom_point(size = 1.6) +
-    scale_color_manual(values = c(`TRUE` = "steelblue", `FALSE` = "firebrick"),
-                       name = "95% CI covers truth") +
-    coord_equal(xlim = rng, ylim = rng) +
-    labs(x = expression(delta[true]), y = expression(delta[estimated]),
-         title = "Subject-level random effect: truth vs. posterior median",
-         subtitle = sprintf("Coverage: %.0f%% of subjects (%d/%d)",
-                            100 * mean(df$covered), sum(df$covered), N)) +
-    theme_bw()
-}
-
-## -----------------------------------------------------------------------
-## Helper: dense continuous trajectory via the same bidirectional trapezoid
-## integrator getTraj() uses (see model.R's .trap_step_R), but evaluated on
-## a fine, evenly-spaced time grid rather than only at the observed visit
-## ages -- for smooth plotting.
-## -----------------------------------------------------------------------
-predict_traj_path <- function(x0, t0, t_min, t_max, ygrid, Rgrid, mult, maxSub = 0.25) {
-  step_from <- function(t_start, t_end) {
-    if (t_end == t_start) return(data.frame(t = t_start, mu = x0))
-    dir <- sign(t_end - t_start)
-    tCur <- t_start; muCur <- x0
-    tt <- t_start; mm <- x0
-    while (dir * (t_end - tCur) > 1e-9) {
-      h <- dir * min(maxSub, abs(t_end - tCur))
-      muCur <- .trap_step_R(muCur, h, ygrid, Rgrid, mult)
-      tCur <- tCur + h
-      tt <- c(tt, tCur); mm <- c(mm, muCur)
-    }
-    data.frame(t = tt, mu = mm)
-  }
-  fwd <- if (t_max > t0) step_from(t0, t_max) else data.frame(t = t0, mu = x0)
-  bwd <- if (t_min < t0) step_from(t0, t_min) else data.frame(t = t0, mu = x0)
-  out <- rbind(bwd[nrow(bwd):1, ], fwd[-1, , drop = FALSE])
-  out[order(out$t), ]
-}
-
-## -----------------------------------------------------------------------
-## 3. Subject-level trajectories: original age scale and disease-age scale
-## -----------------------------------------------------------------------
-## `ids`       -- which subjects to plot (a handful; each becomes one facet panel)
-## `amy_thres` -- positivity threshold anchoring the disease-age scale
-## `pad`       -- years to extend the continuous curve beyond the observed visits
+##  ORCHESTRATION + RECOVERY DIAGNOSTICS
+##  CORRECTED VERSION -- see FIXES.md
 ##
-## Disease-age convention: each curve is re-based to its OWN positivity-
-## crossing age (truth's curve by alpha_true, the estimated curve by
-## alpha_est), so the panel shows how far the recovered curve/onset is
-## shifted from truth even when the two agree well on the original age
-## scale. Observed points are shown against alpha_est, since that's the
-## only shift available in practice (no alpha_true without truth).
-## Subjects whose trajectory never crosses amy_thres (alpha = NA, for
-## either truth or the estimate) are silently dropped from the disease-age
-## panel only -- they still appear in the original-age panel.
-plot_subject_trajectories <- function(ids, truth, design, sim, fit, samp,
-                                      amy_thres = 0.75, maxSub = 0.25, pad = 2) {
-  ph <- fit$prepped
-  theta_cols <- grep("^theta\\[", colnames(samp))
-  theta_est  <- colMeans(samp[, theta_cols, drop = FALSE])
-  Rpop_est   <- as.numeric(exp(ph$Bgrid %*% theta_est))
-  
-  traj_list <- list(); pt_list <- list(); obs_list <- list(); lab_list <- list()
-  
-  for (i in ids) {
-    Ji <- design$J[i]
-    ages_i <- design$tvisit[i, 1:Ji]
-    obs_i  <- sim$dat[sim$dat$id == i, ]
-    
-    ## truth: anchor, acceleration factor
-    x0_true    <- design$x0_true[i]
-    t0_true    <- design$t0_true[i]
-    mult_true  <- exp(sim$delta_true[i])
-    
-    ## posterior: anchor, acceleration factor (posterior medians)
-    x0_est    <- median(samp[, paste0("x[", i, "]")])
-    delta_est <- median(samp[, paste0("delta[", i, "]")])
-    mult_est  <- exp(delta_est)
-    t0_est    <- ph$t0[i]   # anchor time is fixed by the data, not re-estimated
-    
-    ## continuous trajectories, original age scale
-    t_min <- min(ages_i, t0_true, t0_est) - pad
-    t_max <- max(ages_i, t0_true, t0_est) + pad
-    
-    path_true <- predict_traj_path(x0_true, t0_true, t_min, t_max,
-                                   truth$ygrid, truth$Rgrid_true, mult_true, maxSub)
-    path_est  <- predict_traj_path(x0_est, t0_est, t_min, t_max,
-                                   ph$ygrid, Rpop_est, mult_est, maxSub)
-    
-    traj_list[[length(traj_list) + 1]] <- rbind(
-      data.frame(id = i, curve = "Truth",     scale = "Original age", t = path_true$t, mu = path_true$mu),
-      data.frame(id = i, curve = "Estimated", scale = "Original age", t = path_est$t,  mu = path_est$mu)
-    )
-    pt_list[[length(pt_list) + 1]] <- rbind(
-      data.frame(id = i, curve = "Truth",     scale = "Original age", t = t0_true, mu = x0_true),
-      data.frame(id = i, curve = "Estimated", scale = "Original age", t = t0_est,  mu = x0_est)
-    )
-    
-    ## positivity ages, for the disease-age scale
-    alpha_true <- predict_positivity_age(x0_true, t0_true, amy_thres,
-                                         truth$ygrid, truth$Rgrid_true, mult_true)
-    alpha_est  <- predict_positivity_age(x0_est, t0_est, amy_thres,
-                                         ph$ygrid, Rpop_est, mult_est)
-    
-    if (!is.na(alpha_true) && !is.na(alpha_est)) {
-      traj_list[[length(traj_list) + 1]] <- rbind(
-        data.frame(id = i, curve = "Truth",     scale = "Disease age", t = path_true$t - alpha_true, mu = path_true$mu),
-        data.frame(id = i, curve = "Estimated", scale = "Disease age", t = path_est$t - alpha_est,  mu = path_est$mu)
-      )
-      pt_list[[length(pt_list) + 1]] <- rbind(
-        data.frame(id = i, curve = "Truth",     scale = "Disease age", t = t0_true - alpha_true, mu = x0_true),
-        data.frame(id = i, curve = "Estimated", scale = "Disease age", t = t0_est - alpha_est,  mu = x0_est)
-      )
-      obs_list[[length(obs_list) + 1]] <- data.frame(
-        id = i, age = obs_i$age, suvr = obs_i$suvr, disease_age = obs_i$age - alpha_est
-      )
-    } else {
-      obs_list[[length(obs_list) + 1]] <- data.frame(
-        id = i, age = obs_i$age, suvr = obs_i$suvr, disease_age = NA_real_
-      )
-    }
-    
-    lab_list[[length(lab_list) + 1]] <- data.frame(
-      id = i, label = sprintf("acc: true=%.2f, est=%.2f", mult_true, mult_est)
-    )
+##  Fixes concentrated here:
+##
+##  * RMSE WHERE THERE IS DATA. The original computed rate_rmse over the whole
+##    [0.30, 1.70] grid, ~29% of which had no observations at all under its
+##    design -- so a large part of the reported error was pure prior
+##    extrapolation, unrelated to how well the estimator did where it could
+##    learn anything. Both numbers are now reported, labelled.
+##
+##  * ONE ESTIMATOR OF R(y), NOT TWO. The original used exp(B %*% colMeans(theta))
+##    for the RMSE but rowMeans(exp(B %*% t(theta))) for the plot -- two
+##    different quantities differing by a Jensen term. Everything now uses the
+##    posterior mean of R(y) itself.
+##
+##  * ALL REPLICATES RETAINED. The original returned only the last replicate's
+##    subject table and last_run, silently discarding the rest.
+##
+##  * POSITIVITY AGES ARE THINNED AND VECTORISED (see model.R section 6). The
+##    original looped over every draw x every subject in pure R and rebuilt the
+##    701 x K matrix product inside the subject loop -- slower than the MCMC.
+## =============================================================================
+
+source("data_gen.R")
+source("sim_data.R")
+source("mcmc_run.R")
+
+library(ggplot2)
+
+
+## =============================================================================
+##  1. One replicate
+## =============================================================================
+##
+##  `built` may be passed in to reuse an already-compiled model across
+##  replicates -- valid only when the DESIGN (visit times, J) is unchanged,
+##  since every constant except the observed data is a function of the times
+##  alone. See mcmc_run.R.
+run_one_replicate <- function(truth, design, built = NULL, seed = NULL,
+                              amy_thres = 0.75,
+                              YL = 0.30, YU = 1.70, K = 10, step_y = 0.002,
+                              Delta = 0.25, integrator_method = 2,
+                              niter = 6000, nburnin = 2000, nchains = 1,
+                              thin_positivity = 200, verbose = TRUE) {
+
+  sim <- simulate_amyloid_data(truth, design, seed = seed, verbose = verbose)
+  ph  <- prepare_amyloid(sim$dat, YL = YL, YU = YU, K = K,
+                         step_y = step_y, Delta = Delta)
+
+  if (is.null(built)) {
+    built <- build_amyloid_model(ph, integrator_method = integrator_method,
+                                 verbose = verbose)
+  } else {
+    ## Reusing a compiled model: the design must match, or the baked-in
+    ## constants are wrong for this data.
+    stopifnot("cannot reuse a compiled model across a CHANGED design" =
+                identical(dim(built$ph$y), dim(ph$y)) &&
+                max(abs(built$ph$tvisit - ph$tvisit), na.rm = TRUE) < 1e-12)
+    built$ph <- ph                      # y, yhat, w_hat differ; times do not
   }
-  
-  traj_df <- do.call(rbind, traj_list)
-  pt_df   <- do.call(rbind, pt_list)
-  obs_df  <- do.call(rbind, obs_list)
-  lab_df  <- do.call(rbind, lab_list)
-  
-  make_panel <- function(scale_name, obs_x) {
-    td <- traj_df[traj_df$scale == scale_name, ]
-    pd <- pt_df[pt_df$scale == scale_name, ]
-    if (nrow(td) == 0) return(NULL)
-    
-    # place the acceleration-factor label near the top-right corner of each panel
-    lab_pos <- aggregate(cbind(t, mu) ~ id, td, max)
-    lab_pos <- merge(lab_pos, lab_df, by = "id")
-    
-    ggplot(td, aes(x = t, y = mu, color = curve)) +
-      geom_point(data = obs_df, aes(x = .data[[obs_x]], y = suvr),
-                 inherit.aes = FALSE, size = 0.9, alpha = 0.6, na.rm = TRUE) +
-      geom_line(linewidth = 0.7) +
-      geom_point(data = pd, aes(x = t, y = mu, shape = curve), size = 2.4, na.rm = TRUE) +
-      geom_text(data = lab_pos, aes(x = t, y = mu, label = label),
-                inherit.aes = FALSE, hjust = 1, vjust = 1, size = 2.6) +
-      scale_color_manual(values = c(Truth = "black", Estimated = "steelblue"), name = "Curve") +
-      scale_shape_manual(values = c(Truth = 16, Estimated = 17), name = "Curve") +
-      facet_wrap(~ id, scales = "free", labeller = label_both) +
-      labs(x = if (scale_name == "Original age") "Age (years)" else "Disease age (years from positivity)",
-           y = "SUVR",
-           title = paste0(scale_name, " scale: truth vs. posterior estimate"),
-           subtitle = "Points: observed data; triangle/circle: initial value x_i at t0") +
-      theme_bw()
-  }
-  
+
+  fit <- run_amyloid_mcmc(built, y_new = ph$y, niter = niter, nburnin = nburnin,
+                          nchains = nchains, seed = seed, verbose = verbose)
+  fit$built <- built
+
+  rec <- recovery_summary(truth, design, sim, fit, amy_thres = amy_thres,
+                          thin_positivity = thin_positivity)
+  list(sim = sim, ph = ph, fit = fit, recovery = rec, built = built)
+}
+
+
+## =============================================================================
+##  2. Recovery summary
+## =============================================================================
+recovery_summary <- function(truth, design, sim, fit, amy_thres = 0.75,
+                             thin_positivity = 200) {
+  ph  <- fit$prepped
+  smp <- fit$samples
+
+  ## ---- R(y): posterior mean of the CURVE, not exp(mean of theta) ---------
+  theta_cols  <- paste0("theta[", seq_len(ph$K), "]")
+  R_draws     <- exp(smp[, theta_cols, drop = FALSE] %*% t(ph$Bgrid))   # draws x nGrid
+  R_mean      <- colMeans(R_draws)
+  R_lo        <- apply(R_draws, 2, quantile, 0.025)
+  R_hi        <- apply(R_draws, 2, quantile, 0.975)
+  R_true_grid <- truth$rate_fun(ph$ygrid)
+
+  ## Where the estimator could actually learn anything: the range of LATENT
+  ## values the subjects occupied. Outside it, R(y) is prior extrapolation.
+  lat <- as.numeric(sim$mu_true[!is.na(sim$mu_true)])
+  sup <- quantile(lat, c(0.01, 0.99))
+  in_sup <- ph$ygrid >= sup[1] & ph$ygrid <= sup[2]
+
+  rmse_full <- sqrt(mean((R_mean - R_true_grid)^2))
+  rmse_sup  <- sqrt(mean((R_mean[in_sup] - R_true_grid[in_sup])^2))
+  cover_R   <- mean(R_true_grid[in_sup] >= R_lo[in_sup] & R_true_grid[in_sup] <= R_hi[in_sup])
+  ## Relative error is the more interpretable scale for a rate spanning an
+  ## order of magnitude across the domain.
+  rel_sup   <- mean(abs(R_mean[in_sup] - R_true_grid[in_sup]) / R_true_grid[in_sup])
+
+  ## ---- variance components ----------------------------------------------
+  vc <- do.call(rbind, lapply(
+    list(c("sigma_delta", design$sigma_delta_true),
+         c("sigma_eps",   design$sigma_eps_true)),
+    function(z) {
+      d <- smp[, z[1]]; tv <- as.numeric(z[2]); ci <- quantile(d, c(0.025, 0.975))
+      data.frame(parameter = z[1], truth = tv, post_mean = mean(d),
+                 post_median = median(d), post_sd = sd(d),
+                 ci_lo = unname(ci[1]), ci_hi = unname(ci[2]),
+                 covered = tv >= ci[1] && tv <= ci[2],
+                 rel_bias = (mean(d) - tv) / tv,
+                 stringsAsFactors = FALSE)
+    }))
+  rownames(vc) <- NULL
+
+  ## ---- subject-level delta ----------------------------------------------
+  dcols <- paste0("delta[", seq_len(ph$N), "]")
+  dd <- smp[, dcols, drop = FALSE]
+  delta_df <- data.frame(
+    id = seq_len(ph$N), J = ph$J,
+    truth = sim$delta_true,
+    post_mean = colMeans(dd),
+    lo = apply(dd, 2, quantile, 0.025),
+    hi = apply(dd, 2, quantile, 0.975),
+    stringsAsFactors = FALSE)
+  delta_df$covered <- delta_df$truth >= delta_df$lo & delta_df$truth <= delta_df$hi
+
+  ## ---- anchor value x_tilde ---------------------------------------------
+  xt <- reconstruct_x_tilde(smp, ph)
+  x_df <- data.frame(id = seq_len(ph$N), truth = design$x0_true,
+                     post_mean = colMeans(xt),
+                     lo = apply(xt, 2, quantile, 0.025),
+                     hi = apply(xt, 2, quantile, 0.975))
+  x_df$covered <- x_df$truth >= x_df$lo & x_df$truth <= x_df$hi
+
+  ## ---- positivity age ----------------------------------------------------
+  alpha_true <- truth_positivity_age(sim$solver, design$x0_true, design$t0_true,
+                                     sim$delta_true, amy_thres)
+  pa <- positivity_age_posterior(smp, ph, thres = amy_thres,
+                                 thin_to = thin_positivity)
+  alpha_df <- data.frame(
+    id = seq_len(ph$N), truth = alpha_true,
+    post_median = apply(pa, 2, median, na.rm = TRUE),
+    lo = apply(pa, 2, quantile, 0.025, na.rm = TRUE),
+    hi = apply(pa, 2, quantile, 0.975, na.rm = TRUE),
+    na_frac = apply(pa, 2, function(z) mean(is.na(z))))
+  alpha_df$covered <- with(alpha_df, !is.na(truth) & !is.na(lo) &
+                             truth >= lo & truth <= hi)
+
   list(
-    original    = make_panel("Original age", "age"),
-    disease_age = make_panel("Disease age", "disease_age")
+    rate = list(ygrid = ph$ygrid, mean = R_mean, lo = R_lo, hi = R_hi,
+                truth = R_true_grid, support = sup, in_support = in_sup),
+    rate_metrics = data.frame(
+      metric = c("RMSE over full domain", "RMSE over observed support",
+                 "mean relative error on support", "pointwise 95% coverage on support"),
+      value  = c(rmse_full, rmse_sup, rel_sup, cover_R)),
+    variance_components = vc,
+    delta = delta_df, x_tilde = x_df, alpha = alpha_df,
+    delta_coverage = mean(delta_df$covered),
+    delta_cor = cor(delta_df$truth, delta_df$post_mean),
+    x_coverage = mean(x_df$covered),
+    alpha_coverage = mean(alpha_df$covered[!is.na(alpha_df$truth)]),
+    support = sup
   )
 }
 
-## -----------------------------------------------------------------------
-## 4. Posterior estimates of key variance components vs. truth
-## -----------------------------------------------------------------------
-variance_component_table <- function(design, samp) {
-  pull_summary <- function(param, truth_val) {
-    draws <- samp[, param]
-    ci <- quantile(draws, c(0.025, 0.975))
-    data.frame(
-      parameter   = param,
-      truth       = truth_val,
-      post_mean   = mean(draws),
-      post_median = median(draws),
-      post_sd     = sd(draws),
-      ci_lower    = unname(ci[1]),
-      ci_upper    = unname(ci[2]),
-      covered     = truth_val >= ci[1] && truth_val <= ci[2]
-    )
+
+## =============================================================================
+##  3. Printed report
+## =============================================================================
+print_recovery <- function(res, diag = NULL) {
+  r <- res$recovery
+  cat("\n", strrep("=", 74), "\n", sep = "")
+  cat("RECOVERY SUMMARY\n")
+  cat(strrep("=", 74), "\n", sep = "")
+
+  cat("\n-- population rate curve R(y) --\n")
+  m <- r$rate_metrics
+  for (i in seq_len(nrow(m))) cat(sprintf("  %-38s %.5f\n", m$metric[i], m$value[i]))
+  cat(sprintf("  observed value support (1%%-99%% of latent): [%.3f, %.3f]\n",
+              r$support[1], r$support[2]))
+
+  cat("\n-- variance components --\n")
+  print(format(r$variance_components, digits = 4), row.names = FALSE)
+
+  cat("\n-- subject-level parameters --\n")
+  cat(sprintf("  delta_i   : correlation(truth, posterior mean) = %.3f, 95%% CI coverage = %.1f%%\n",
+              r$delta_cor, 100 * r$delta_coverage))
+  cat(sprintf("  x_tilde_i : 95%% CI coverage = %.1f%%\n", 100 * r$x_coverage))
+  cat(sprintf("  alpha_i   : 95%% CI coverage = %.1f%% (of %d subjects with a true crossing)\n",
+              100 * r$alpha_coverage, sum(!is.na(r$alpha$truth))))
+
+  ## Coverage broken out by J: subjects with more visits carry more
+  ## longitudinal information, so recovery should improve with J. If it does
+  ## not, that is a red flag the pooled number would hide.
+  ## Correlation is the informative column here, not coverage. A subject whose
+  ## delta is unidentified gets a wide interval that covers the truth almost
+  ## automatically -- high coverage, zero information. Correlation between the
+  ## true and estimated delta is what actually says whether the data pinned it
+  ## down, and it is the column that exposes the J = 2 problem.
+  cat("\n-- delta_i recovery by number of visits --\n")
+  sp <- split(r$delta, r$delta$J)
+  tab <- do.call(rbind, lapply(names(sp), function(k) {
+    d <- sp[[k]]
+    data.frame(J = k, n = nrow(d),
+               coverage = sprintf("%.0f%%", 100 * mean(d$covered)),
+               correlation = sprintf("%.3f",
+                 if (nrow(d) > 2) cor(d$truth, d$post_mean) else NA_real_),
+               mean_CI_width = sprintf("%.3f", mean(d$hi - d$lo)),
+               post_sd = sprintf("%.3f", sd(d$post_mean)),
+               stringsAsFactors = FALSE)
+  }))
+  print(tab, row.names = FALSE)
+  cat(sprintf("  (true sd of delta = %.3f)\n", sd(r$delta$truth)))
+
+  if (!is.null(diag)) {
+    cat("\n-- convergence --\n")
+    cat(sprintf("  %d draws, %d chain(s). R-hat %s.\n", diag$n_draws, diag$nchains,
+                if (diag$rhat_available) "reported below" else
+                  "NOT AVAILABLE (single chain) -- see FIXES.md on this limitation"))
+    print(diag$worst, row.names = FALSE)
+    if (!is.null(diag$subject_ess)) {
+      s <- diag$subject_ess
+      cat(sprintf("  per-subject parameters: ESS min %.0f, median %.0f, max %.0f; %d of %d below 100\n",
+                  s["min"], s["median"], s["max"], s["n_below_100"], s["n_total"]))
+    }
   }
-  
-  tab <- rbind(
-    pull_summary("sigma_delta", design$sigma_delta_true),
-    pull_summary("sigma_eps",   design$sigma_eps_true)
-  )
-  rownames(tab) <- NULL
-  tab
+  cat("\n", strrep("=", 74), "\n", sep = "")
+  invisible(NULL)
 }
 
-## Example single run:
-res <- simu(outer_iter = 1, N = 200, niter = 8000, nburnin = 3000, nchains = 3)
-res$summaries[[1]]
-res$df
 
-## Diagnostic plots for the run above -----------------------------------
-lr <- res$last_run
- 
-plot_rate_curve(lr$truth, lr$fit, lr$samp)
-plot_delta_recovery(lr$sim, lr$samp)
+## =============================================================================
+##  4. Plots
+## =============================================================================
+plot_rate_curve <- function(res) {
+  r <- res$recovery$rate
+  df <- data.frame(y = r$ygrid, est = r$mean, lo = r$lo, hi = r$hi, truth = r$truth)
+  ggplot(df, aes(y)) +
+    annotate("rect", xmin = res$recovery$support[1], xmax = res$recovery$support[2],
+             ymin = -Inf, ymax = Inf, fill = "grey85", alpha = 0.45) +
+    geom_ribbon(aes(ymin = lo, ymax = hi), fill = "steelblue", alpha = 0.25) +
+    geom_line(aes(y = truth, colour = "Truth"), linewidth = 0.9) +
+    geom_line(aes(y = est, colour = "Posterior mean"), linewidth = 0.9) +
+    scale_colour_manual(values = c(Truth = "black", `Posterior mean` = "steelblue"),
+                        name = NULL) +
+    labs(x = "SUVR (y)", y = "R(y)  (SUVR / year)",
+         title = "Population rate curve: truth vs posterior",
+         subtitle = "Band: 95% pointwise credible interval. Shaded region: 1%-99% of observed latent values\n(outside it, the curve is prior extrapolation, not an estimate)") +
+    theme_minimal(base_size = 10) + theme(legend.position = "bottom")
+}
 
-traj_plots <- plot_subject_trajectories(ids = 1:6, lr$truth, lr$design, lr$sim,
-                                        lr$fit, lr$samp, amy_thres = 0.75)
-traj_plots$original
-traj_plots$disease_age
+plot_delta_recovery <- function(res) {
+  d <- res$recovery$delta
+  rng <- range(c(d$truth, d$lo, d$hi))
+  ggplot(d, aes(truth, post_mean, colour = covered)) +
+    geom_abline(slope = 1, intercept = 0, linetype = "dashed", colour = "grey30") +
+    geom_linerange(aes(ymin = lo, ymax = hi), alpha = 0.18) +
+    geom_point(size = 1.1, alpha = 0.75) +
+    scale_colour_manual(values = c(`TRUE` = "steelblue", `FALSE` = "firebrick"),
+                        name = "95% CI covers truth") +
+    coord_equal(xlim = rng, ylim = rng) +
+    labs(x = expression(delta[true]), y = expression(delta[posterior~mean]),
+         title = "Subject-level rate multiplier: truth vs posterior",
+         subtitle = sprintf("N = %d, coverage %.1f%%, correlation %.3f",
+                            nrow(d), 100 * res$recovery$delta_coverage,
+                            res$recovery$delta_cor)) +
+    theme_minimal(base_size = 10) + theme(legend.position = "bottom")
+}
 
-variance_component_table(lr$design, lr$samp)
+plot_delta_by_visits <- function(res) {
+  d <- res$recovery$delta
+  d$Jf <- factor(d$J)
+  ggplot(d, aes(Jf, post_mean - truth)) +
+    geom_hline(yintercept = 0, linetype = "dashed", colour = "grey30") +
+    geom_boxplot(outlier.size = 0.5, fill = "steelblue", alpha = 0.35) +
+    labs(x = "number of visits (J)", y = expression(delta[posterior~mean] - delta[true]),
+         title = "delta recovery improves with follow-up",
+         subtitle = "More visits carry more longitudinal information about the rate multiplier") +
+    theme_minimal(base_size = 10)
+}
+
+plot_alpha_recovery <- function(res) {
+  a <- res$recovery$alpha[!is.na(res$recovery$alpha$truth), ]
+  rng <- range(c(a$truth, a$post_median), na.rm = TRUE)
+  ggplot(a, aes(truth, post_median, colour = covered)) +
+    geom_abline(slope = 1, intercept = 0, linetype = "dashed", colour = "grey30") +
+    geom_point(size = 1.1, alpha = 0.7) +
+    scale_colour_manual(values = c(`TRUE` = "steelblue", `FALSE` = "firebrick"),
+                        name = "95% CI covers truth") +
+    coord_equal(xlim = rng, ylim = rng) +
+    labs(x = "true age of positivity", y = "posterior median",
+         title = "Age of amyloid positivity: truth vs posterior",
+         subtitle = sprintf("coverage %.1f%% over %d subjects with a true crossing",
+                            100 * res$recovery$alpha_coverage, nrow(a))) +
+    theme_minimal(base_size = 10) + theme(legend.position = "bottom")
+}
+
+## Per-subject trajectories (truth vs posterior) now live in plot_results.R as
+## fig_trajectories(); see run_study.R / make_figures().
+
+plot_traces <- function(fit, params = c("sigma_delta", "sigma_eps", "theta[1]", "theta[5]", "theta[10]", "tau_theta")) {
+  params <- intersect(params, colnames(fit$samples))
+  df <- do.call(rbind, lapply(params, function(p)
+    data.frame(iter = seq_len(nrow(fit$samples)), value = fit$samples[, p], param = p)))
+  ggplot(df, aes(iter, value)) +
+    geom_line(linewidth = 0.25, colour = "steelblue") +
+    facet_wrap(~param, scales = "free_y") +
+    labs(x = "post-burn-in iteration", y = NULL,
+         title = "Traceplots",
+         subtitle = "Single chain: these show mixing, but cannot rule out a chain stuck in a wrong mode") +
+    theme_minimal(base_size = 9)
+}
+
+save_all_plots <- function(res, fit,
+                           file = "figures/recovery_report.pdf") {
+  dir.create(dirname(file), showWarnings = FALSE, recursive = TRUE)
+  pdf(file, width = 8, height = 6)
+  print(plot_rate_curve(res)); print(plot_delta_recovery(res))
+  print(plot_delta_by_visits(res)); print(plot_alpha_recovery(res))
+  print(plot_traces(fit))
+  dev.off()
+  cat(sprintf("  wrote %s\n", file))
+  invisible(file)
+}
+
+
+## =============================================================================
+##  5. Multi-replicate driver
+## =============================================================================
+##
+##  The design is held FIXED across replicates and only delta/eps/y are
+##  redrawn, which is what makes the compiled model reusable: every model
+##  constant except the observed data is a function of the visit times alone.
+##  ALL replicates are retained, not just the last.
+simu <- function(n_rep = 1, N = 1000, seed = 20260827,
+                 truth_shape = "logistic", amy_thres = 0.75,
+                 niter = 6000, nburnin = 2000, nchains = 1,
+                 K = 10, step_y = 0.002, Delta = 0.25,
+                 save_dir = NULL, verbose = TRUE) {
+
+  set.seed(seed)
+  truth  <- simulate_true_rate(shape = truth_shape)
+  design <- simulate_design(N = N)
+
+  reps <- vector("list", n_rep)
+  built <- NULL
+  for (it in seq_len(n_rep)) {
+    if (verbose) cat(sprintf("\n===== replicate %d of %d =====\n", it, n_rep))
+    r <- run_one_replicate(truth, design, built = built, seed = seed + 1000L * it,
+                           amy_thres = amy_thres, K = K, step_y = step_y,
+                           Delta = Delta, niter = niter, nburnin = nburnin,
+                           nchains = nchains, verbose = verbose)
+    built <- r$built                       # compile once, reuse thereafter
+    r$diag <- mcmc_diagnostics(r$fit)
+    if (verbose) print_recovery(r, r$diag)
+    ## Drop the heavy compiled handles from the stored record.
+    r$built <- NULL; r$fit$built <- NULL
+    reps[[it]] <- r
+    ## Per-replicate files exist for crash recovery on long multi-replicate
+    ## runs, so they are only worth their disk cost when there is more than one
+    ## replicate -- study.rds already holds everything.
+    if (!is.null(save_dir) && n_rep > 1) {
+      dir.create(save_dir, showWarnings = FALSE, recursive = TRUE)
+      saveRDS(r, file.path(save_dir, sprintf("replicate_%03d.rds", it)))
+    }
+  }
+
+  agg <- if (n_rep > 1) aggregate_replicates(reps, design) else NULL
+  list(truth = truth, design = design, replicates = reps, aggregate = agg,
+       built = built)
+}
+
+## Frequentist summary across replicates: coverage is a repeated-sampling
+## property and needs more than one realisation.
+aggregate_replicates <- function(reps, design) {
+  vc <- do.call(rbind, lapply(seq_along(reps), function(i) {
+    v <- reps[[i]]$recovery$variance_components; v$replicate <- i; v
+  }))
+  per_rep <- data.frame(
+    replicate = seq_along(reps),
+    rmse_support = vapply(reps, function(r) r$recovery$rate_metrics$value[2], numeric(1)),
+    delta_coverage = vapply(reps, function(r) r$recovery$delta_coverage, numeric(1)),
+    delta_cor = vapply(reps, function(r) r$recovery$delta_cor, numeric(1)),
+    alpha_coverage = vapply(reps, function(r) r$recovery$alpha_coverage, numeric(1)))
+  cover <- aggregate(covered ~ parameter, vc, mean)
+  bias  <- aggregate(rel_bias ~ parameter, vc, mean)
+  list(variance_components = vc, per_replicate = per_rep,
+       coverage = merge(cover, bias, by = "parameter"))
+}
