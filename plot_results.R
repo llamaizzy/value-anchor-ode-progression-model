@@ -157,14 +157,14 @@ fig_traces <- function(fit, params = c("sigma_delta", "sigma_eps", "m_x", "tau_x
 
 
 ## -----------------------------------------------------------------------
-##  7. Individual trajectories: truth vs posterior mean (single replicate)
+##  7. Individual trajectories: truth vs posterior mean along calendar age (single replicate)
 ## -----------------------------------------------------------------------
 ##  The truth curve comes from the EXACT separable solve (truth_mu_at), not
 ##  from re-running the estimator's own integrator, so truth and estimate are
 ##  genuinely independent here. The estimate integrates the posterior-mean
 ##  rate curve with the model's own stepper (step_R) outward from the
 ##  reference time t0, using the posterior-mean anchor and delta.
-fig_trajectories <- function(rp, design, ids = NULL, pad = 2) {
+fig_trajectories_calendar <- function(rp, design, ids = NULL, pad = 2) {
   ph <- rp$ph; rc <- rp$recovery; sim <- rp$sim
   R_post <- rc$rate$mean
 
@@ -230,17 +230,162 @@ fig_trajectories <- function(rp, design, ids = NULL, pad = 2) {
     theme_study(9)
 }
 
+## -----------------------------------------------------------------------
+##  8. Individual trajectories aligned by the PREDICTED age of onset
+## -----------------------------------------------------------------------
+##  Disease-time axis: x = calendar age - subject i's posterior
+##  age of amyloid positivity (recovery$alpha$post_median), so x = 0 is the
+##  predicted onset. The estimate is still integrated from the
+##  reference time t0 (not from the crossing), so its diamond stays on its
+##  curve; it therefore need not hit the threshold exactly at 0. Subjects with
+##  no posterior crossing (alpha = NA) have no origin and are omitted.
+fig_trajectories_onset <- function(rp, design, ids = NULL,
+                                   pre = 30, post = 40, thres = 0.75) {
+  ph <- rp$ph; rc <- rp$recovery; sim <- rp$sim
+  R_post <- rc$rate$mean
+  a_est  <- rc$alpha$post_median            # predicted age of onset, NA if none
+  
+  if (is.null(ids)) {
+    ids <- vapply(sort(unique(ph$J)), function(j) {
+      cand <- which(ph$J == j & is.finite(a_est))
+      if (length(cand)) cand[1] else NA_integer_
+    }, integer(1))
+    ids <- head(ids[!is.na(ids)], 6)
+  } else {
+    drop <- ids[!is.finite(a_est[ids])]
+    if (length(drop))
+      warning("fig_trajectories_onset: no predicted onset for subject(s) ",
+              paste(drop, collapse = ", "), " -- dropped")
+    ids <- ids[is.finite(a_est[ids])]
+  }
+  stopifnot("fig_trajectories_onset: no subjects left to plot" = length(ids) > 0)
+  
+  ## Disease-time grid; convert back to calendar age per subject to evaluate.
+  s <- seq(-pre, post, length.out = 200)
+  traj <- do.call(rbind, lapply(ids, function(i) {
+    age <- s + a_est[i]
+    
+    mu_true <- truth_mu_at(sim$solver, design$x0_true[i], design$t0_true[i],
+                           age, sim$delta_true[i])
+    
+    x_est <- rc$x_tilde$post_mean[i]; delta_est <- rc$delta$post_mean[i]
+    mu_est <- vapply(age, function(tg) {
+      dt <- tg - ph$t0[i]; M <- max(ceiling(abs(dt) / ph$Delta), 1L); h <- dt / M
+      mu <- x_est
+      for (m in seq_len(M))
+        mu <- step_R(mu, h, R_post, ph$YL, ph$step_y, ph$n_ygrid, exp(delta_est), 2)
+      mu
+    }, numeric(1))
+    
+    rbind(data.frame(id = i, s = s, mu = mu_true, curve = "Truth"),
+          data.frame(id = i, s = s, mu = mu_est,  curve = "Posterior mean"))
+  }))
+  
+  obs <- do.call(rbind, lapply(ids, function(i)
+    data.frame(id = i, s = ph$tvisit[i, 1:ph$J[i]] - a_est[i],
+               y = ph$y[i, 1:ph$J[i]])))
+  
+  ## Anchor x_i at the reference time t0
+  anc <- do.call(rbind, lapply(ids, function(i) rbind(
+    data.frame(id = i, s = design$t0_true[i] - a_est[i], mu = design$x0_true[i], curve = "Truth"),
+    data.frame(id = i, s = ph$t0[i] - a_est[i], mu = rc$x_tilde$post_mean[i], curve = "Posterior mean"))))
+  
+  ## Per-panel note: acceleration factor exp(delta), true vs recovered.
+  acc_lab <- data.frame(id = ids, txt = sprintf(
+    "exp(delta):  true %.2f   est %.2f",
+    exp(sim$delta_true[ids]), exp(rc$delta$post_mean[ids])))
+  
+  id_lab <- sprintf("subject %d  (J = %d)", ids, ph$J[ids])
+  as_id  <- function(d) { d$id <- factor(d$id, levels = ids, labels = id_lab); d }
+  traj <- as_id(traj); obs <- as_id(obs); anc <- as_id(anc); acc_lab <- as_id(acc_lab)
+  
+  ## Clip y to the data band so a few fast subjects do not flatten the rest;
+  ## their curve just leaves the top of the panel.
+  ytop <- max(obs$y, thres) + 0.45
+  ybot <- min(obs$y, thres) - 0.15
+  
+  ggplot(traj, aes(s, mu, colour = curve)) +
+    geom_hline(yintercept = thres, linetype = "dotted", colour = INK2, linewidth = 0.4) +
+    geom_vline(xintercept = 0, linetype = "dashed", colour = INK2, linewidth = 0.4) +
+    geom_line(linewidth = 0.7) +
+    geom_point(data = obs, aes(s, y), inherit.aes = FALSE, size = 1.3,
+               colour = INK2, alpha = 0.85) +
+    geom_point(data = anc, shape = 23, size = 2.3, stroke = 0.7, fill = "white") +
+    geom_text(data = acc_lab, aes(x = Inf, y = -Inf, label = txt), inherit.aes = FALSE,
+              hjust = 1.04, vjust = -0.8, size = 2.7, colour = INK2) +
+    scale_colour_manual(values = c(Truth = INK, `Posterior mean` = EST), name = NULL) +
+    coord_cartesian(xlim = c(-pre, post), ylim = c(ybot, ytop)) +
+    facet_wrap(~id) +
+    labs(x = "years relative to predicted age of onset", y = "SUVR",
+         title = "Individual trajectories aligned by predicted age of onset",
+         subtitle = paste0(
+           "x = 0 is the posterior age of amyloid positivity. Diamonds mark the anchor x_i; ",
+           "dotted line the threshold.\n",
+           "Offset of the black (true) crossing from x = 0 is the onset-timing error.")) +
+    theme_study(9)
+}
+
+
+## -----------------------------------------------------------------------
+##  9. Subject rate curves vs the shared population curve (single replicate)
+## -----------------------------------------------------------------------
+##  One population spline R(y) scaled by a single scalar per subject. So each 
+## "subject curve" here is literally the posterior-mean population curve 
+## times exp(delta_hat_i) -- a pure vertical rescaling. 
+## The figure shows the shared shape and the spread of the rate multiplier around it
+
+fig_subject_rate_curves <- function(G, n_show = 60, seed = 1, thres = 0.75) {
+  rate <- G$rate[G$rate$rep == 1, ]
+  subj <- G$subj[G$subj$rep == 1, ]
+  sup  <- quantile(subj$x_truth, c(0.01, 0.99))
+
+  set.seed(seed)
+  ids <- sort(sample(nrow(subj), min(n_show, nrow(subj))))
+  fac <- exp(subj$d_est[ids])                       # exp(delta_hat_i)
+
+  lines <- data.frame(
+    id   = rep(subj$id[ids], each = nrow(rate)),
+    y    = rate$y,
+    rate = as.vector(outer(rate$est, fac)))         # Rbar(y) * exp(delta_hat_i)
+
+  key <- c("Population (mean)"     = "solid",
+           "Truth"                 = "dotdash",
+           "Positivity threshold"  = "dashed")
+
+  ggplot(lines, aes(y, rate, group = id)) +
+    annotate("rect", xmin = sup[1], xmax = sup[2], ymin = -Inf, ymax = Inf,
+             fill = GRIDC, alpha = 0.55) +
+    geom_vline(data = data.frame(x = thres),
+               aes(xintercept = x, linetype = "Positivity threshold"),
+               colour = INK2, linewidth = 0.5, inherit.aes = FALSE) +
+    geom_line(colour = EST, linewidth = 0.3, alpha = 0.5) +
+    geom_line(data = rate, aes(y, truth, linetype = "Truth"), inherit.aes = FALSE,
+              colour = INK, linewidth = 0.7) +
+    geom_line(data = rate, aes(y, est, linetype = "Population (mean)"),
+              inherit.aes = FALSE, colour = INK, linewidth = 1.1) +
+    scale_linetype_manual(values = key, breaks = names(key), name = NULL) +
+    guides(linetype = guide_legend(override.aes = list(
+             colour = c(INK, INK, INK2), linewidth = c(1.1, 0.7, 0.5)))) +
+    labs(x = "SUVR value (y)", y = "Rate of SUVR change / year",
+         title = "Subject-specific rate curves vs. the population curve",
+         subtitle = paste0(
+           sprintf("%d randomly sampled subjects. ", length(ids)),
+           "Blue: posterior-mean population R(y) scaled by exp(delta_hat_i).\n",
+           "Shaded: 1%-99% of true anchor values. ", lab_n(G))) +
+    theme_study()
+}
 
 ## -----------------------------------------------------------------------
 ##  Write everything
 ## -----------------------------------------------------------------------
-make_figures <- function(study, out_dir = "figures") {
+make_figures <- function(study, out_dir = "figures", amy_thres = 0.75) {
   dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
   G <- gather_results(study)
   r1 <- study$replicates[[1]]
 
   figs <- list(
     rate_curve  = fig_rate_curve(G),
+    subject_rate_curves = fig_subject_rate_curves(G, thres = amy_thres),
     anchor      = fig_recovery(G, "x_truth", "x_est", "x_lo", "x_hi",
                                "Anchor value x_i: posterior mean vs truth", "anchor SUVR"),
     disease_age = fig_recovery(G, "a_truth", "a_est", "a_lo", "a_hi",
@@ -251,7 +396,8 @@ make_figures <- function(study, out_dir = "figures") {
                                "delta (log rate multiplier)"),
     by_visits   = fig_by_visits(G),
     traces      = fig_traces(r1$fit),
-    trajectories = fig_trajectories(r1, study$design)
+    trajectories_calendar = fig_trajectories_calendar(r1, study$design),
+    trajectories_onset = fig_trajectories_onset(r1, study$design)
   )
 
   pdf(file.path(out_dir, "recovery_figures.pdf"), width = 9, height = 5.4)

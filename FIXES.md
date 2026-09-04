@@ -13,7 +13,7 @@ diff ../simu.R  simu.R
 **Part I** is the four things worth understanding. **Part II** is the itemised
 detail, for when you are editing the code.
 
----
+----
 
 # Part I — Key considerations
 
@@ -74,7 +74,7 @@ truth on a B-spline basis and then fitting with a B-spline basis puts the truth
 inside the estimator's function space; now the fitted basis is genuinely
 misspecified, which is the honest test.
 
-## 3. The anchor needs a real prior, not one centred on the data
+## 3. The anchor needs a real prior, not one centered on the data
 
 The old specification was
 

@@ -17,7 +17,7 @@ CFG <- list(
   niter       = 8000,        # total MCMC iterations
   nburnin     = 3000,        #   of which discarded
   nchains     = 1,           # >1 enables R-hat; see README
-  truth_shape = "logistic",  # or "hump" -- see data_gen.R
+  truth_shape = "hump",  # or "hump" -- see data_gen.R
   amy_thres   = 0.75,        # amyloid positivity threshold
   K           = 10,          # spline basis dimension
   step_y      = 0.002,       # value-grid resolution
